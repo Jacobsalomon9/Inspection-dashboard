@@ -1,0 +1,231 @@
+import { useMemo, useRef } from "react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import jsPDF from "jspdf";
+import * as htmlToImage from "html-to-image";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  LineChart,
+  Line,
+  ResponsiveContainer
+} from "recharts";
+// ✅ Score helper
+const calculateScore = (responses = {}) => {
+  const values = Object.values(responses);
+  let pass = 0, fail = 0;
+
+
+  values.forEach(r => {
+    if (r?.status === "pass") pass++;
+    if (r?.status === "fail") fail++;
+  });
+
+
+  const total = pass + fail;
+  return total ? Math.round((pass / total) * 100) : 0;
+};
+
+// ✅ Risk helper
+const getRiskLevel = (score) => {
+  if (score < 70) return { label: "HIGH", color: [255, 0, 0] };
+  if (score < 85) return { label: "MEDIUM", color: [255, 165, 0] };
+  return { label: "LOW", color: [0, 128, 0] };
+};
+
+export default function DashboardPage({ history = [] }) {
+  const barRef = useRef(null);
+  const lineRef = useRef(null);
+
+  // ✅ Precompute scores (performance optimization)
+  const scoredHistory = useMemo(() => {
+    return history.map(h => ({
+      ...h,
+      score: calculateScore(h.responses)
+    }));
+  }, [history]);
+  const chartData = useMemo(() =>
+    scoredHistory.map(h => ({
+      building: h.building,
+      score: h.score
+    })), [scoredHistory]);
+  const trendData = useMemo(() =>
+    scoredHistory.map(h => ({
+      date: new Date(h.date).toLocaleDateString(),
+      score: h.score
+    })), [scoredHistory]);
+  const facilityStats = useMemo(() => {
+    const grouped = {};
+
+
+    scoredHistory.forEach(h => {
+      if (!grouped[h.building]) grouped[h.building] = [];
+      grouped[h.building].push(h);
+    });
+
+
+    return Object.entries(grouped).map(([building, audits]) => {
+      const avg = audits.reduce((acc, a) => acc + a.score, 0) / audits.length;
+      return { building, avgScore: Math.round(avg), inspections: audits.length };
+    });
+  }, [scoredHistory]);
+  // ✅ Load image helper (fix for jsPDF)
+  const loadImage = async (url) => {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.readAsDataURL(blob);
+    });
+  };
+
+
+  const exportDashboardPDF = async () => {
+    const doc = new jsPDF();
+    let y = 10;
+
+    // ✅ Fix logo loading
+    try {
+      const logo = await loadImage("/logo.png");
+      doc.addImage(logo, "PNG", 150, 5, 40, 15);
+    } catch {}
+    // Executive summary
+    doc.setFontSize(16);
+    doc.text("Executive Summary", 10, y);
+    y += 10;
+
+    const avgScore = scoredHistory.length
+      ? Math.round(scoredHistory.reduce((a, b) => a + b.score, 0) / scoredHistory.length)
+      : 0;
+
+    const highRisk = scoredHistory.filter(h => h.score < 70).length;
+    doc.setFontSize(12);
+    doc.text(`Total Inspections: ${scoredHistory.length}`, 10, y);
+    y += 6;
+    doc.text(`Average Score: ${avgScore}%`, 10, y);
+    y += 6;
+    doc.text(`High Risk Buildings: ${highRisk}`, 10, y);
+
+    // ✅ Top risk buildings
+    y += 10;
+    doc.text("Top Risk Buildings:", 10, y);
+
+    const sorted = [...scoredHistory]
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 5);
+
+    y += 6;
+    sorted.forEach((b) => {
+      doc.text(`${b.building} (${b.score}%)`, 12, y);
+      y += 5;
+    });
+
+    // ✅ Chart capture stability fix (delay)
+    await new Promise(r => setTimeout(r, 300));
+    try {
+      if (barRef.current) {
+        const img = await htmlToImage.toPng(barRef.current, { pixelRatio: 2 });
+        doc.addPage();
+        doc.text("Score by Building", 10, 10);
+        doc.addImage(img, "PNG", 10, 20, 180, 100);
+      }
+
+      if (lineRef.current) {
+        const img2 = await htmlToImage.toPng(lineRef.current, { pixelRatio: 2 });
+        doc.addPage();
+        doc.text("Trend Over Time", 10, 10);
+        doc.addImage(img2, "PNG", 10, 20, 180, 100);
+      }
+    } catch (err) {
+      console.error("Chart capture failed", err);
+    }
+
+    // ✅ Inspection details
+    doc.addPage();
+    y = 10;
+
+    scoredHistory.forEach((h, i) => {
+      const risk = getRiskLevel(h.score);
+      const dateStr = h.date ? new Date(h.date).toISOString() : "N/A";
+
+      doc.setTextColor(...risk.color);
+      doc.text(`${i + 1}. ${h.building} (${h.score}%)`, 10, y);
+      doc.setTextColor(0, 0, 0);
+
+      y += 5;
+      doc.text(`Inspector: ${h.inspector || "Unknown"}`, 12, y);
+      y += 5;
+      doc.text(`Date: ${dateStr}`, 12, y);
+
+      y += 7;
+
+      if (y > 260) {
+        doc.addPage();
+        y = 10;
+      }
+    });
+
+    doc.save(`dashboard-report-${Date.now()}.pdf`);
+  };
+
+  return (
+    <div className="p-6 space-y-6 max-w-7xl mx-auto">
+
+      <div className="flex justify-between items-center">
+        <h1 className="text-3xl font-bold">Inspection Dashboard</h1>
+        <Button onClick={exportDashboardPDF}>Export PDF</Button>
+      </div>
+
+      {/* ✅ Responsive Charts */}
+      <div className="grid lg:grid-cols-2 gap-6">
+        <Card>
+          <CardContent ref={barRef} className="p-4 h-[300px]">
+            <h3>Score by Building</h3>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="building" />
+                <YAxis />
+                <Tooltip />
+                <Bar dataKey="score" />
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent ref={lineRef} className="p-4 h-[300px]">
+            <h3>Trend Over Time</h3>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={trendData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="date" />
+                <YAxis />
+                <Tooltip />
+                <Line type="monotone" dataKey="score" />
+              </LineChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Facility Stats */}
+      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {facilityStats.map(f => (
+          <Card key={f.building}>
+            <CardContent className="p-4">
+              <h3>{f.building}</h3>
+              <p>Avg Score: {f.avgScore}%</p>
+              <p>Inspections: {f.inspections}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
